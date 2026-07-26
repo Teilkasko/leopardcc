@@ -1,20 +1,19 @@
 from interfaces.ProjectInterface import ProjectInterface
-from interfaces.LintError import LintError
 from interfaces.TestError import TestError
+from interfaces.LintError import LintError
 from helpers.ProjectHelper import (
-    install_npm_packages, fix_eslint_issues, 
-    get_eslint_errors, get_mocha_errors
+    get_tap_errors, install_npm_packages, 
+    fix_eslint_issues, get_eslint_errors
 )
 
-
-class D3Shape(ProjectInterface):
+class Fastify(ProjectInterface):
     @property
     def path(self):
-        return 'repos/d3-shape'
+        return 'repos/fastify'
 
     @property
     def code_dir(self):
-        return '/src'
+        return '/lib'
 
     def after_copy_hook(self, path_suffix) -> None:
         project_copy_path = self.path + path_suffix
@@ -24,16 +23,18 @@ class D3Shape(ProjectInterface):
         fixed_code = fix_eslint_issues(code, self.dirty_path)
 
         return fixed_code
-    
+
     def get_lint_errors(self):
-        lint_command = 'npx eslint src'
+        lint_command = 'npx eslint'
         errors = get_eslint_errors(self.dirty_path, lint_command)
 
         return errors
 
     def get_test_errors(self):
-        test_command = 'npx mocha "test/**/*-test.js"'
-        line_pattern = r' *at Context.<anonymous> \S+d3-shape\D+:(\d+):\d+\)\n'
-        errors = get_mocha_errors(self.dirty_path, test_command, line_pattern)
+        test_command = 'npx borp --reporter=tap'
+        line_pattern = r'TestContext.<anonymous> \((\S+underscore\D+):(\d+):\d+\)'
+        errors = get_tap_errors(self.dirty_path, test_command, line_pattern)
 
         return errors
+        
+        

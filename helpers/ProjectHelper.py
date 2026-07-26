@@ -3,24 +3,28 @@ import re
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from interfaces.LintError import LintError
 from interfaces.TestError import TestError
+from tap import parser #type: ignore
 
 
-def install_npm_packages(project_copy_path: str):
+def install_npm_packages(project_copy_path: str, package_manager_command: str='npm'):
     node_modules_dir = '/node_modules'
-    shutil.rmtree(project_copy_path + node_modules_dir)
+    dirpath = Path(project_copy_path) / node_modules_dir
+    if dirpath.exists() and dirpath.is_dir():
+        shutil.rmtree(dirpath)
     subprocess.run(['cd ' + project_copy_path +
-                    ' && npm install'],
+                    ' && ' + package_manager_command + ' install'],
                     shell=True, capture_output=True, text=True, check=True)
 
 
-def fix_eslint_issues(code: str, dirty_path: str) -> str:
+def fix_eslint_issues(code: str, dirty_path: str, package_manager_command: str='npx') -> str:
     patch_file_path = dirty_path + "/patch.js"
     with open(patch_file_path, 'w') as patch_file:
         patch_file.write(code)
     
-    lint_fix_command = 'cat patch.js | npx eslint --stdin --format json --fix-dry-run'
+    lint_fix_command = 'cat patch.js | ' + package_manager_command + ' eslint --stdin --format json --fix-dry-run'
     proc = subprocess.run(['cd ' + dirty_path + ' && ' + lint_fix_command],
                         shell=True, capture_output=True, text=True, check=False)
 
@@ -73,7 +77,7 @@ def get_eslint_errors(dirty_path: str, lint_command: str) -> list[LintError]:
         eslint_json_output_path = dirty_path + '/' + eslint_json_name
 
         subprocess.run(['cd ' + dirty_path + ' && ' + lint_command],
-                        shell=True, capture_output=True, text=True, check=True, timeout=30)
+                        shell=True, capture_output=True, text=True, check=True, timeout=120)
         
         if os.path.exists(eslint_json_output_path):
             os.remove(eslint_json_output_path) 
@@ -133,6 +137,31 @@ def get_mocha_errors(dirty_path: str, test_command: str, line_pattern: str) -> l
         if os.path.exists(mocha_json_output_path):
             os.remove(mocha_json_output_path) 
         return errors
+    
+def get_mocha_errors_from_stdout(dirty_path: str, test_command: str, line_pattern: str) -> list[TestError]:
+    try:
+        mocha_json_name = 'mocha-output.json'
+        output_options = ' --reporter json > ' + mocha_json_name
+        test_command += output_options
+        
+        mocha_json_output_path = dirty_path + '/' + mocha_json_name
+        
+        subprocess.run(['cd ' + dirty_path + ' && ' + test_command],
+                        shell=True, capture_output=True, text=True, check=True, timeout=30)
+        
+        if os.path.exists(mocha_json_output_path):
+            os.remove(mocha_json_output_path) 
+        return []
+
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        with open(mocha_json_output_path, 'r') as mocha_json_file:
+            mocha_json_output = mocha_json_file.read()
+
+        errors = __get_mocha_errors_from_json_output(mocha_json_output, line_pattern)
+
+        if os.path.exists(mocha_json_output_path):
+            os.remove(mocha_json_output_path) 
+        return errors    
 
 
 def __get_jest_errors_from_json_output(jest_json_output: str, line_pattern: str) -> list[TestError]:
@@ -186,4 +215,141 @@ def get_jest_errors(dirty_path: str, test_command: str, line_pattern: str) -> li
 
         if os.path.exists(jest_json_output_path):
             os.remove(jest_json_output_path) 
+        return errors
+    
+def __get_vitest_errors_from_json_output(jest_json_output: str, line_pattern: str) -> list[TestError]:
+    test_info = json.loads(jest_json_output)
+    test_results = test_info['testResults']
+
+    errors: list[TestError] = []
+    for test in test_results:
+        if test['status'] == "failed":
+            for assertion in test['assertionResults']:
+                if assertion['status'] == "failed":
+                    ansi_code_escape_pattern = r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])'
+                    cleaned_messages = re.sub(ansi_code_escape_pattern, "", "".join(assertion['failureMessages']))
+                    
+                    error: TestError = {
+                        'expectation': assertion['fullName'],
+                        'message_stack': cleaned_messages,
+                        'test_file': test['name'],
+                        'target_line': None
+                    }
+                    line_match = re.search(line_pattern, error['message_stack'])
+                    if line_match is not None:
+                        error['target_line'] = int(line_match.group(1))
+
+                    errors.append(error)
+
+    return errors
+
+def get_vitest_errors(dirty_path: str, test_command: str, line_pattern: str) -> list[TestError]:
+    try:
+        vitest_json_name = 'vitest-output.json'
+        output_options = '  --reporter=json --outputFile=' + vitest_json_name
+        test_command +=  output_options
+
+        vitest_json_output_path = dirty_path + '/' + vitest_json_name
+
+        subprocess.run(['cd ' + dirty_path + ' && ' + test_command],
+                        shell=True, capture_output=True, text=True, check=True, timeout=120)
+        
+        if os.path.exists(vitest_json_output_path):
+            os.remove(vitest_json_output_path) 
+        
+        return []
+
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        with open(vitest_json_output_path) as jest_json_file:
+            jest_json_output = jest_json_file.read()
+
+        errors = __get_vitest_errors_from_json_output(jest_json_output, line_pattern)
+
+        if os.path.exists(vitest_json_output_path):
+            os.remove(vitest_json_output_path) 
+        return errors   
+    
+# function needed because of a bug in the output of tap that breaks the YAML parsing    
+def read_fixed_tap_file(test_output):
+    inside_yaml = False
+    inside_braces = False
+    output_lines = []
+
+    for line in test_output.splitlines():
+        stripped_line = line.strip()
+
+        if stripped_line == "---":
+            inside_yaml = True
+            output_lines.append(line)
+            continue
+        elif stripped_line == "..." and inside_yaml:
+            inside_yaml = False
+            output_lines.append(line)
+            continue
+
+        if inside_yaml:
+            if "{" in line:
+                inside_braces = True
+            if "}" in line:
+                inside_braces = False
+                line = '   ' + line
+
+            if inside_braces and not stripped_line.endswith("{"):
+                output_lines.append('  ' + line)
+            else:
+                output_lines.append(line)
+        else:
+            output_lines.append(line)
+
+    return '\n'.join(output_lines)
+
+def __parse_tap_output(test_output: str, file_line_pattern)-> list[TestError]:
+    tap_parser = parser.Parser()
+    tap_file = tap_parser.parse_text(read_fixed_tap_file(test_output))
+    
+    errors: list[TestError] = []
+    for line in tap_file:
+        if line.category == 'test' and not line.ok:
+            regex_match = re.search(file_line_pattern, line.yaml_block['stack'])
+            if regex_match is not None:
+                test_file = regex_match.group(1)
+                test_line = regex_match.group(2)
+            else:
+                print('failed to read test_file')
+                print(line.yaml_block['stack'])
+
+            error: TestError = {
+                'expectation': line.description,
+                'message_stack': line.yaml_block['stack'],
+                'test_file': test_file,
+                'target_line': int(test_line)
+            }
+            errors.append(error)
+
+    return errors
+
+def get_tap_errors(dirty_path: str, test_command: str, line_pattern: str) -> list[TestError]:
+    try:
+        output_file_name = 'output.tap'
+        test_command = test_command + ' > ' + output_file_name
+        
+        output_path = dirty_path + '/' + output_file_name
+        
+        result = subprocess.run(test_command, cwd=dirty_path, shell=True, check=True, timeout=120)
+        if result.returncode != 0:
+            pass
+            # raise subprocess.CalledProcessError(result.returncode, test_command)
+        
+        if os.path.exists(output_path):
+            os.remove(output_path) 
+        return []
+
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        with open(output_path, 'r') as output_file:
+            test_output = output_file.read()
+
+        errors = __parse_tap_output(test_output, line_pattern)
+
+        if os.path.exists(output_path):
+            os.remove(output_path) 
         return errors

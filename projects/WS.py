@@ -3,18 +3,18 @@ from interfaces.LintError import LintError
 from interfaces.TestError import TestError
 from helpers.ProjectHelper import (
     install_npm_packages, fix_eslint_issues, 
-    get_eslint_errors, get_mocha_errors
+    get_eslint_errors, get_mocha_errors_from_stdout
 )
 
 
-class D3Shape(ProjectInterface):
+class WS(ProjectInterface):
     @property
     def path(self):
-        return 'repos/d3-shape'
+        return 'repos/ws'
 
     @property
     def code_dir(self):
-        return '/src'
+        return '/lib'
 
     def after_copy_hook(self, path_suffix) -> None:
         project_copy_path = self.path + path_suffix
@@ -26,14 +26,14 @@ class D3Shape(ProjectInterface):
         return fixed_code
     
     def get_lint_errors(self):
-        lint_command = 'npx eslint src'
+        lint_command = 'npx eslint .'
         errors = get_eslint_errors(self.dirty_path, lint_command)
 
         return errors
 
     def get_test_errors(self):
-        test_command = 'npx mocha "test/**/*-test.js"'
+        test_command = 'npx mocha "test/*.test.js"'
         line_pattern = r' *at Context.<anonymous> \S+d3-shape\D+:(\d+):\d+\)\n'
-        errors = get_mocha_errors(self.dirty_path, test_command, line_pattern)
+        errors = get_mocha_errors_from_stdout(self.dirty_path, test_command, line_pattern)
 
         return errors
